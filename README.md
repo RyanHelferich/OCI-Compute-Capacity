@@ -37,4 +37,5 @@ Shape=VM.Standard3.Flex (OCPUs=1.0, Mem=8.0GB), FD=FAULT-DOMAIN-1 -> Status=AVAI
 
 
 ## Updates
-Added optional JSON output, creating a timestamped JSON file container all of the compute capacity information. 
+01-05-2025:Added optional JSON output, creating a timestamped JSON file container all of the compute capacity information. 
+04-14-2026: Added additional error handling to populate Max OCPU and Max RAM sizing when overprovisioned during capacity check. 

@@ -2,6 +2,63 @@ import oci
 import json
 import datetime
 
+
+def get_shape_limits(compute_client, tenancy_id):
+    shape_limits = {}
+
+    response = oci.pagination.list_call_get_all_results(
+        compute_client.list_shapes,
+        compartment_id=tenancy_id
+    )
+
+    for shape in response.data:
+        max_ocpus = shape.ocpus
+        max_memory_in_gbs = shape.memory_in_gbs
+
+        if shape.is_flexible:
+            if getattr(shape, "ocpu_options", None):
+                max_ocpus = shape.ocpu_options.max
+            if getattr(shape, "memory_options", None):
+                max_memory_in_gbs = shape.memory_options.max_in_g_bs
+
+        shape_limits[shape.shape] = {
+            "is_flexible": shape.is_flexible,
+            "max_ocpus": max_ocpus,
+            "max_memory_in_gbs": max_memory_in_gbs
+        }
+
+    return shape_limits
+
+
+def validate_shape_config(shape_name, desired_ocpus, desired_memory, shape_limits):
+    if desired_ocpus is None or desired_memory is None:
+        return None
+
+    shape_details = shape_limits.get(shape_name)
+    if not shape_details:
+        return f"Shape={shape_name} was not found in the subscribed region."
+
+    if not shape_details["is_flexible"]:
+        return None
+
+    max_ocpus = shape_details["max_ocpus"]
+    max_memory = shape_details["max_memory_in_gbs"]
+
+    errors = []
+    if max_ocpus is not None and desired_ocpus > max_ocpus:
+        errors.append(f"OCPUs requested ({desired_ocpus}) exceeds max allowed ({max_ocpus})")
+    if max_memory is not None and desired_memory > max_memory:
+        errors.append(f"memory requested ({desired_memory}GB) exceeds max allowed ({max_memory}GB)")
+
+    if errors:
+        return (
+            f"Invalid config for shape {shape_name}: {'; '.join(errors)}. "
+            f"Please use values at or below OCPUs={max_ocpus} and Memory={max_memory}GB."
+        )
+
+    return None
+
+
 def main(output_json=False):
     """
     If output_json=True, the script will generate a JSON file of results.
@@ -48,6 +105,7 @@ def main(output_json=False):
 
         # ComputeClient for capacity reports
         compute_client = oci.core.ComputeClient(config)
+        shape_limits = get_shape_limits(compute_client, tenancy_id)
 
         # ------------------------------------------------------------------
         # 3. LOOP OVER UNIQUE AD NAMES
@@ -62,6 +120,36 @@ def main(output_json=False):
                 shape_name = shape_info["shape"]
                 desired_ocpus = shape_info["ocpus"]
                 desired_memory = shape_info["memory_in_gbs"]
+
+                validation_error = validate_shape_config(
+                    shape_name,
+                    desired_ocpus,
+                    desired_memory,
+                    shape_limits
+                )
+
+                if validation_error:
+                    print(
+                        f"     [INVALID INPUT] Region={region}, AD={ad_name}, "
+                        f"Shape={shape_name}: {validation_error}"
+                    )
+
+                    if output_json:
+                        results.append({
+                            "region": region,
+                            "availability_domain": ad_name,
+                            "fault_domain": None,
+                            "shape": shape_name,
+                            "requested_ocpus": desired_ocpus,
+                            "requested_memory_gbs": desired_memory,
+                            "actual_ocpus": None,
+                            "actual_memory_gbs": None,
+                            "status": "INVALID_INPUT",
+                            "count": None,
+                            "message": validation_error
+                        })
+
+                    continue
 
                 for fd in fault_domains:
                     # Build one shape availability detail
@@ -98,9 +186,9 @@ def main(output_json=False):
                         # Each shape in shape_availabilities is returned in report.shape_availabilities
                         for shape_availability in report.shape_availabilities:
                             # e.g. "AVAILABLE", "NO_CAPACITY", "RESERVED", etc.
-                            status = shape_availability.availability_status  
+                            status = shape_availability.availability_status
                             # Count of how many instances can be launched
-                            count = shape_availability.available_count         
+                            count = shape_availability.available_count
                             # The shape requested
                             shape_used = shape_availability.instance_shape
                             # The fault domain
@@ -113,6 +201,8 @@ def main(output_json=False):
                                 mem_used = shape_config.memory_in_gbs
                                 config_str = f"(OCPUs={ocpus_used}, Mem={mem_used}GB)"
                             else:
+                                ocpus_used = None
+                                mem_used = None
                                 config_str = ""
 
                             # Print to terminal
@@ -130,8 +220,8 @@ def main(output_json=False):
                                     "shape": shape_used,
                                     "requested_ocpus": desired_ocpus,
                                     "requested_memory_gbs": desired_memory,
-                                    "actual_ocpus": ocpus_used if shape_config else None,
-                                    "actual_memory_gbs": mem_used if shape_config else None,
+                                    "actual_ocpus": ocpus_used,
+                                    "actual_memory_gbs": mem_used,
                                     "status": status,
                                     "count": count
                                 })
